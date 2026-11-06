@@ -1,0 +1,224 @@
+
+const DERIV_AUTHORIZE_URL = "https://auth.deriv.com/oauth2/auth";
+const DERIV_TOKEN_URL = "https://auth.deriv.com/oauth2/token";
+const CALLBACK_URL =
+  "https://ai-trading-arena-bot.dollarprinterchoosen.workers.dev/auth/callback";
+
+function cookie(name, value, maxAge = 600, path = "/auth") {
+  return `${name}=${encodeURIComponent(value)}; HttpOnly; Secure; SameSite=Lax; Path=${path}; Max-Age=${maxAge}`;
+}
+
+function readCookie(request, name) {
+  const header = request.headers.get("Cookie") || "";
+  const item = header.split(";").map(v => v.trim())
+    .find(v => v.startsWith(`${name}=`));
+  return item ? decodeURIComponent(item.slice(name.length + 1)) : null;
+}
+
+function base64url(bytes) {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function randomString(length = 64) {
+  const bytes = new Uint8Array(length);
+  crypto.getRandomValues(bytes);
+  return base64url(bytes);
+}
+
+function response(message, status = 200, headers = {}) {
+  return new Response(message, {
+    status,
+    headers: { "Content-Type": "text/plain; charset=utf-8", ...headers }
+  });
+}
+
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+    const path = url.pathname;
+
+    try {
+      // Start Deriv OAuth login
+      if (path === "/auth/login" && request.method === "GET") {
+        if (!env.DERIV_CLIENT_ID) {
+          return response("Server setup incomplete: Deriv client ID is missing.", 500);
+        }
+
+        const verifier = randomString(64);
+        const state = randomString(32);
+
+        const digest = await crypto.subtle.digest(
+          "SHA-256",
+          new TextEncoder().encode(verifier)
+        );
+
+        const challenge = base64url(new Uint8Array(digest));
+
+        const authorizeUrl = new URL(DERIV_AUTHORIZE_URL);
+        authorizeUrl.searchParams.set("response_type", "code");
+        authorizeUrl.searchParams.set("client_id", env.DERIV_CLIENT_ID);
+        authorizeUrl.searchParams.set("redirect_uri", CALLBACK_URL);
+        authorizeUrl.searchParams.set("scope", "trade");
+        authorizeUrl.searchParams.set("state", state);
+        authorizeUrl.searchParams.set("code_challenge", challenge);
+        authorizeUrl.searchParams.set("code_challenge_method", "S256");
+
+        return new Response(null, {
+          status: 302,
+          headers: {
+            "Location": authorizeUrl.toString(),
+            "Set-Cookie": [
+              cookie("deriv_oauth_state", state),
+              cookie("deriv_oauth_verifier", verifier)
+            ].join(", ")
+          }
+        });
+      }
+
+      // Handle Deriv's OAuth callback
+      if (path === "/auth/callback" && request.method === "GET") {
+        const code = url.searchParams.get("code");
+        const returnedState = url.searchParams.get("state");
+        const savedState = readCookie(request, "deriv_oauth_state");
+        const verifier = readCookie(request, "deriv_oauth_verifier");
+
+        const clearCookies = [
+          cookie("deriv_oauth_state", "", 0),
+          cookie("deriv_oauth_verifier", "", 0)
+        ];
+
+        if (url.searchParams.get("error")) {
+          return response(
+            "Deriv login was cancelled or denied. Please try again.",
+            400,
+            { "Set-Cookie": clearCookies }
+          );
+        }
+
+        if (!code || !returnedState || !savedState ||
+            returnedState !== savedState || !verifier) {
+          return response(
+            "Login verification failed. Please start again from the dashboard.",
+            400,
+            { "Set-Cookie": clearCookies }
+          );
+        }
+
+        if (!env.DERIV_CLIENT_ID || !env.TOKENS) {
+          return response(
+            "Server setup incomplete. Please configure the Cloudflare client ID and TOKENS storage.",
+            500,
+            { "Set-Cookie": clearCookies }
+          );
+        }
+
+        const body = new URLSearchParams({
+          grant_type: "authorization_code",
+          client_id: env.DERIV_CLIENT_ID,
+          code,
+          code_verifier: verifier,
+          redirect_uri: CALLBACK_URL
+        });
+
+        const tokenResponse = await fetch(DERIV_TOKEN_URL, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded"
+          },
+          body
+        });
+
+        if (!tokenResponse.ok) {
+          return response(
+            "Deriv could not complete the token exchange. Please try connecting again.",
+            502,
+            { "Set-Cookie": clearCookies }
+          );
+        }
+
+        const tokenData = await tokenResponse.json();
+
+        if (!tokenData.access_token) {
+          return response(
+            "Deriv did not return an access token. Please try again.",
+            502,
+            { "Set-Cookie": clearCookies }
+          );
+        }
+
+        const sessionId = randomString(32);
+        const expiresIn = Math.max(60, Number(tokenData.expires_in) || 3600);
+
+        await env.TOKENS.put(
+          `session:${sessionId}`,
+          JSON.stringify({
+            access_token: tokenData.access_token,
+            expires_at: Date.now() + expiresIn * 1000
+          }),
+          { expirationTtl: expiresIn }
+        );
+
+        return new Response(
+          "Deriv account connected successfully. You can return to the AI Trading dashboard.",
+          {
+            status: 200,
+            headers: {
+              "Content-Type": "text/plain; charset=utf-8",
+              "Set-Cookie": [
+                ...clearCookies,
+                cookie("ai_trading_session", sessionId, expiresIn, "/")
+              ],
+              "Cache-Control": "no-store"
+            }
+          }
+        );
+      }
+
+      // Check whether this browser has a connected Deriv session
+      if (path === "/api/connection" && request.method === "GET") {
+        const sessionId = readCookie(request, "ai_trading_session");
+
+        if (!sessionId || !env.TOKENS) {
+          return Response.json({ connected: false });
+        }
+
+        const saved = await env.TOKENS.get(`session:${sessionId}`);
+
+        if (!saved) {
+          return Response.json({ connected: false });
+        }
+
+        return Response.json(
+          { connected: true },
+          { headers: { "Cache-Control": "no-store" } }
+        );
+      }
+
+      // Disconnect this browser session
+      if (path === "/auth/logout" && request.method === "POST") {
+        const sessionId = readCookie(request, "ai_trading_session");
+
+        if (sessionId && env.TOKENS) {
+          await env.TOKENS.delete(`session:${sessionId}`);
+        }
+
+        return response("Disconnected.", 200, {
+          "Set-Cookie": cookie("ai_trading_session", "", 0, "/")
+        });
+      }
+
+      // Serve the existing dashboard
+      if (env.ASSETS) {
+        return env.ASSETS.fetch(request);
+      }
+
+      return response("Dashboard assets are not configured yet.", 404);
+
+    } catch (error) {
+      console.error("Worker error:", error.message);
+      return response("A server error occurred. Please try again.", 500);
+    }
+  }
+};
