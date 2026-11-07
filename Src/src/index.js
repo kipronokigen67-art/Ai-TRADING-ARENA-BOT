@@ -2,7 +2,7 @@
 const DERIV_AUTHORIZE_URL = "https://auth.deriv.com/oauth2/auth";
 const DERIV_TOKEN_URL = "https://auth.deriv.com/oauth2/token";
 const CALLBACK_URL =
-  "https://ai-trading-arena-bot.dollarprinterchoosen.workers.dev/auth/callback";
+  "https://ai-trading-arena-bot.kipronokigen67.workers.dev/auth/callback";
 
 function cookie(name, value, maxAge = 600, path = "/auth") {
   return `${name}=${encodeURIComponent(value)}; HttpOnly; Secure; SameSite=Lax; Path=${path}; Max-Age=${maxAge}`;
@@ -32,6 +32,12 @@ function response(message, status = 200, headers = {}) {
     status,
     headers: { "Content-Type": "text/plain; charset=utf-8", ...headers }
   });
+}
+
+function responseWithCookies(body, init = {}, cookies = []) {
+  const headers = new Headers(init.headers || {});
+  for (const value of cookies) headers.append("Set-Cookie", value);
+  return new Response(body, { ...init, headers });
 }
 
 export default {
@@ -65,16 +71,16 @@ export default {
         authorizeUrl.searchParams.set("code_challenge", challenge);
         authorizeUrl.searchParams.set("code_challenge_method", "S256");
 
-        return new Response(null, {
+        return responseWithCookies(null, {
           status: 302,
           headers: {
             "Location": authorizeUrl.toString(),
-            "Set-Cookie": [
-              cookie("deriv_oauth_state", state),
-              cookie("deriv_oauth_verifier", verifier)
-            ].join(", ")
+            "Cache-Control": "no-store"
           }
-        });
+        }, [
+          cookie("deriv_oauth_state", state),
+          cookie("deriv_oauth_verifier", verifier)
+        ]);
       }
 
       // Handle Deriv's OAuth callback
@@ -90,27 +96,27 @@ export default {
         ];
 
         if (url.searchParams.get("error")) {
-          return response(
+          return responseWithCookies(
             "Deriv login was cancelled or denied. Please try again.",
-            400,
-            { "Set-Cookie": clearCookies }
+            { status: 400, headers: { "Cache-Control": "no-store" } },
+            clearCookies
           );
         }
 
         if (!code || !returnedState || !savedState ||
             returnedState !== savedState || !verifier) {
-          return response(
+          return responseWithCookies(
             "Login verification failed. Please start again from the dashboard.",
-            400,
-            { "Set-Cookie": clearCookies }
+            { status: 400, headers: { "Cache-Control": "no-store" } },
+            clearCookies
           );
         }
 
         if (!env.DERIV_CLIENT_ID || !env.TOKENS) {
-          return response(
+          return responseWithCookies(
             "Server setup incomplete. Please configure the Cloudflare client ID and TOKENS storage.",
-            500,
-            { "Set-Cookie": clearCookies }
+            { status: 500, headers: { "Cache-Control": "no-store" } },
+            clearCookies
           );
         }
 
@@ -131,20 +137,20 @@ export default {
         });
 
         if (!tokenResponse.ok) {
-          return response(
+          return responseWithCookies(
             "Deriv could not complete the token exchange. Please try connecting again.",
-            502,
-            { "Set-Cookie": clearCookies }
+            { status: 502, headers: { "Cache-Control": "no-store" } },
+            clearCookies
           );
         }
 
         const tokenData = await tokenResponse.json();
 
         if (!tokenData.access_token) {
-          return response(
+          return responseWithCookies(
             "Deriv did not return an access token. Please try again.",
-            502,
-            { "Set-Cookie": clearCookies }
+            { status: 502, headers: { "Cache-Control": "no-store" } },
+            clearCookies
           );
         }
 
@@ -160,19 +166,19 @@ export default {
           { expirationTtl: expiresIn }
         );
 
-        return new Response(
+        return responseWithCookies(
           "Deriv account connected successfully. You can return to the AI Trading dashboard.",
           {
             status: 200,
             headers: {
               "Content-Type": "text/plain; charset=utf-8",
-              "Set-Cookie": [
-                ...clearCookies,
-                cookie("ai_trading_session", sessionId, expiresIn, "/")
-              ],
               "Cache-Control": "no-store"
             }
-          }
+          },
+          [
+            ...clearCookies,
+            cookie("ai_trading_session", sessionId, expiresIn, "/")
+          ]
         );
       }
 
