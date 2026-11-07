@@ -40,6 +40,246 @@ function responseWithCookies(body, init = {}, cookies = []) {
   return new Response(body, { ...init, headers });
 }
 
+
+async function handleTradingSocket(request, env) {
+  if (request.headers.get("Upgrade") !== "websocket") {
+    return response("Expected a WebSocket upgrade.", 426);
+  }
+  const sessionId = readCookie(request, "ai_trading_session");
+  if (!sessionId || !env.TOKENS) return Response.json({ error: "not_connected" }, { status: 401 });
+  const saved = await env.TOKENS.get(`session:${sessionId}`);
+  if (!saved) return Response.json({ error: "session_expired" }, { status: 401 });
+  const session = JSON.parse(saved);
+  if (!session.access_token || (session.expires_at && Date.now() >= session.expires_at)) {
+    await env.TOKENS.delete(`session:${sessionId}`);
+    return Response.json({ error: "session_expired" }, { status: 401 });
+  }
+
+  const accountId = new URL(request.url).searchParams.get("account_id") || "";
+  if (!/^DOT[0-9]{8,12}$/.test(accountId)) {
+    return Response.json({ error: "invalid_account_id" }, { status: 400 });
+  }
+  const accountsResponse = await fetch("https://api.derivws.com/trading/v1/options/accounts", {
+    headers: { "Authorization": `Bearer ${session.access_token}`, "Accept": "application/json" }
+  });
+  if (!accountsResponse.ok) return Response.json({ error: "accounts_verification_failed" }, { status: 502 });
+  const accountsPayload = await accountsResponse.json();
+  const account = Array.isArray(accountsPayload?.data)
+    ? accountsPayload.data.find(a => a?.account_id === accountId)
+    : null;
+  if (!account || account.status !== "active" || account.account_type !== "demo") {
+    return Response.json({ error: "demo_account_required" }, { status: 403 });
+  }
+
+  const otpResponse = await fetch(
+    `https://api.derivws.com/trading/v1/options/accounts/${encodeURIComponent(accountId)}/otp`,
+    { method: "POST", headers: {
+      "Authorization": `Bearer ${session.access_token}`,
+      "Accept": "application/json"
+    } }
+  );
+  const otpPayload = await otpResponse.json();
+  const wsUrl = otpPayload?.data?.url;
+  if (!otpResponse.ok || typeof wsUrl !== "string") {
+    return Response.json({ error: "otp_request_failed" }, { status: otpResponse.status || 502 });
+  }
+  const parsedWsUrl = new URL(wsUrl);
+  if (parsedWsUrl.protocol !== "wss:" || parsedWsUrl.hostname !== "api.derivws.com" ||
+      parsedWsUrl.pathname !== "/trading/v1/options/ws/demo") {
+    return Response.json({ error: "unexpected_websocket_endpoint" }, { status: 502 });
+  }
+  const upstreamResponse = await fetch(wsUrl, { headers: { "Upgrade": "websocket" } });
+  const upstream = upstreamResponse.webSocket;
+  if (!upstream) return Response.json({ error: "deriv_websocket_upgrade_failed" }, { status: 502 });
+
+  const pair = new WebSocketPair();
+  const client = pair[0];
+  const server = pair[1];
+  server.accept({ allowHalfOpen: true });
+  upstream.accept({ allowHalfOpen: true });
+
+  const day = new Date().toISOString().slice(0, 10);
+  const riskKey = `risk:${sessionId}:${accountId}:${day}`;
+  let risk = { netProfit: 0, stopLoss: 10, takeProfit: 10, maxStake: 10,
+    botCaps: { under: 10, over: 10 }, settled: [] };
+  const storedRisk = await env.TOKENS.get(riskKey);
+  if (storedRisk) {
+    try { risk = { ...risk, ...JSON.parse(storedRisk) }; } catch {}
+  }
+  const activeBots = new Set();
+  const validSymbols = new Set();
+  const proposals = new Map();
+  const proposalRequests = new Map();
+  const buyRequests = new Map();
+  const openContracts = new Map();
+  let nextInternalReqId = 900000;
+
+  const sendClient = value => {
+    try { if (server.readyState === WebSocket.OPEN) server.send(JSON.stringify(value)); } catch {}
+  };
+  const sendError = (reqId, code, message) => {
+    const out = { error: { code, message } };
+    if (Number.isInteger(reqId)) out.req_id = reqId;
+    sendClient(out);
+  };
+  const saveRisk = async () => {
+    await env.TOKENS.put(riskKey, JSON.stringify(risk), { expirationTtl: 172800 });
+  };
+  const halted = () => risk.netProfit <= -risk.stopLoss || risk.netProfit >= risk.takeProfit;
+
+  server.addEventListener("message", async event => {
+    let msg;
+    try { msg = JSON.parse(event.data); } catch { return sendError(null, "INVALID_JSON", "Invalid trading message."); }
+
+    if (msg?.ai_trading_config) {
+      const c = msg.ai_trading_config;
+      const values = [c.stop_loss, c.take_profit, c.max_stake, c.under_cap, c.over_cap].map(Number);
+      if (values.some(v => !Number.isFinite(v) || v <= 0 || v > 10)) {
+        return sendError(null, "RISK_LIMIT", "Stop-loss, take-profit and stake caps must be greater than zero and no more than $10.");
+      }
+      risk.stopLoss = values[0];
+      risk.takeProfit = values[1];
+      risk.maxStake = values[2];
+      risk.botCaps = { under: values[3], over: values[4] };
+      await saveRisk();
+      sendClient({ ai_risk_status: { net_profit: risk.netProfit, stop_loss: risk.stopLoss,
+        take_profit: risk.takeProfit, max_stake: risk.maxStake, halted: halted() } });
+      return;
+    }
+
+    if (msg?.ai_bot_state) {
+      const { bot, state } = msg.ai_bot_state;
+      if (!["under", "over"].includes(bot) || !["RUNNING", "PAUSED", "STOPPED"].includes(state)) {
+        return sendError(null, "INVALID_BOT_STATE", "Invalid bot state.");
+      }
+      if (state === "RUNNING" && !halted()) activeBots.add(bot);
+      else activeBots.delete(bot);
+      sendClient({ ai_bot_state: { bot, state: activeBots.has(bot) ? "RUNNING" : state } });
+      if (halted()) sendClient({ ai_risk_halt: { net_profit: risk.netProfit } });
+      return;
+    }
+
+    if (msg?.proposal) {
+      const bot = msg.passthrough?.bot_id;
+      const expectedType = bot === "under" ? "DIGITUNDER" : bot === "over" ? "DIGITOVER" : "";
+      const expectedBarrier = bot === "under" ? "7" : bot === "over" ? "2" : "";
+      const amount = Number(msg.amount);
+      const cap = bot === "under" ? risk.botCaps.under : risk.botCaps.over;
+      if (!activeBots.has(bot) || msg.contract_type !== expectedType || String(msg.barrier) !== expectedBarrier) {
+        return sendError(msg.req_id, "BOT_NOT_ARMED", "This bot is not armed for that contract.");
+      }
+      if (halted()) {
+        activeBots.clear();
+        sendClient({ ai_risk_halt: { net_profit: risk.netProfit } });
+        return sendError(msg.req_id, "RISK_LIMIT_REACHED", "Daily Demo risk limit reached. Bots have been stopped.");
+      }
+      if (!validSymbols.has(msg.underlying_symbol)) {
+        return sendError(msg.req_id, "UNSUPPORTED_MARKET", "Deriv has not confirmed this market supports both digit contracts.");
+      }
+      if (msg.basis !== "stake" || msg.currency !== account.currency ||
+          msg.duration_unit !== "t" || !Number.isInteger(msg.duration) ||
+          msg.duration < 1 || msg.duration > 6 || !Number.isFinite(amount) ||
+          amount < 0.35 || amount > Math.min(risk.maxStake, cap)) {
+        return sendError(msg.req_id, "TRADE_VALIDATION", "Trade parameters exceed the verified Demo limits.");
+      }
+      if (openContracts.size >= 2) return sendError(msg.req_id, "MAX_OPEN_TRADES", "The maximum of two open Demo contracts has been reached.");
+      proposalRequests.set(msg.req_id, { bot, amount, contractType: expectedType, symbol: msg.underlying_symbol });
+      upstream.send(JSON.stringify(msg));
+      return;
+    }
+
+    if (msg?.buy) {
+      const proposal = proposals.get(msg.buy);
+      if (!proposal || !activeBots.has(proposal.bot) || halted()) {
+        return sendError(msg.req_id, "PROPOSAL_NOT_APPROVED", "This proposal is no longer approved for purchase.");
+      }
+      const price = Number(msg.price);
+      if (!Number.isFinite(price) || Math.abs(price - proposal.askPrice) > 0.000001) {
+        return sendError(msg.req_id, "PRICE_MISMATCH", "Buy price must match the latest Deriv proposal price.");
+      }
+      if (openContracts.size >= 2) return sendError(msg.req_id, "MAX_OPEN_TRADES", "The maximum of two open Demo contracts has been reached.");
+      proposals.delete(msg.buy);
+      buyRequests.set(msg.req_id, proposal);
+      upstream.send(JSON.stringify(msg));
+      return;
+    }
+
+    if (msg?.contracts_for) {
+      upstream.send(JSON.stringify(msg));
+      return;
+    }
+    if (msg?.active_symbols || msg?.ticks || msg?.balance || msg?.proposal_open_contract ||
+        msg?.portfolio || msg?.forget || msg?.ping) {
+      upstream.send(JSON.stringify(msg));
+      return;
+    }
+    sendError(msg?.req_id, "REQUEST_NOT_ALLOWED", "This request is not enabled in the Demo trading connection.");
+  });
+
+  upstream.addEventListener("message", async event => {
+    let data;
+    try { data = JSON.parse(event.data); } catch { sendClient(event.data); return; }
+
+    if (data.msg_type === "contracts_for") {
+      const symbol = data.echo_req?.contracts_for;
+      const available = Array.isArray(data.contracts_for?.available) ? data.contracts_for.available : [];
+      const hasUnder = available.some(x => x.contract_type === "DIGITUNDER");
+      const hasOver = available.some(x => x.contract_type === "DIGITOVER");
+      if (symbol && hasUnder && hasOver) validSymbols.add(symbol);
+    }
+
+    if (data.msg_type === "proposal" && data.proposal?.id) {
+      const req = proposalRequests.get(data.req_id);
+      if (req) {
+        const askPrice = Number(data.proposal.ask_price);
+        if (Number.isFinite(askPrice) && askPrice > 0) {
+          proposals.set(data.proposal.id, { ...req, askPrice });
+        }
+        proposalRequests.delete(data.req_id);
+      }
+    }
+
+    if (data.msg_type === "buy" && data.buy?.contract_id) {
+      const meta = buyRequests.get(data.req_id);
+      if (meta) {
+        openContracts.set(data.buy.contract_id, meta);
+        buyRequests.delete(data.req_id);
+      }
+    }
+
+    if (data.msg_type === "proposal_open_contract" && data.proposal_open_contract) {
+      const c = data.proposal_open_contract;
+      const id = c.contract_id;
+      const terminal = c.is_sold === 1 || c.is_sold === true ||
+        ["won", "lost", "sold", "expired"].includes(String(c.status || "").toLowerCase());
+      if (id && terminal && !risk.settled.includes(id)) {
+        const profit = Number(c.profit);
+        if (Number.isFinite(profit)) {
+          risk.netProfit = Number((risk.netProfit + profit).toFixed(2));
+          risk.settled = [...risk.settled, id].slice(-200);
+          openContracts.delete(id);
+          await saveRisk();
+          if (halted()) {
+            activeBots.clear();
+            sendClient({ ai_risk_halt: { net_profit: risk.netProfit } });
+          }
+          sendClient({ ai_risk_status: { net_profit: risk.netProfit, stop_loss: risk.stopLoss,
+            take_profit: risk.takeProfit, halted: halted() } });
+        }
+      }
+    }
+
+    sendClient(data);
+  });
+
+  server.addEventListener("close", () => { try { upstream.close(1000, "Dashboard disconnected"); } catch {} });
+  server.addEventListener("error", () => { try { upstream.close(1011, "Dashboard connection error"); } catch {} });
+  upstream.addEventListener("close", event => { try { server.close(event.code || 1000, "Deriv disconnected"); } catch {} });
+  upstream.addEventListener("error", () => { try { server.close(1011, "Deriv connection error"); } catch {} });
+
+  return new Response(null, { status: 101, webSocket: client });
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -180,6 +420,11 @@ export default {
             cookie("ai_trading_session", sessionId, expiresIn, "/")
           ]
         );
+      }
+
+      // Secure Demo-only WebSocket proxy. Deriv OTP and OAuth token stay server-side.
+      if (path === "/api/trading/ws" && request.method === "GET") {
+        return await handleTradingSocket(request, env);
       }
 
       // Retrieve the authenticated user's Options accounts (demo and real).
