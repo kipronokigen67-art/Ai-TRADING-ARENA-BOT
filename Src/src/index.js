@@ -167,11 +167,11 @@ export default {
         );
 
         return responseWithCookies(
-          "Deriv account connected successfully. You can return to the AI Trading dashboard.",
+          null,
           {
-            status: 200,
+            status: 302,
             headers: {
-              "Content-Type": "text/plain; charset=utf-8",
+              "Location": "/",
               "Cache-Control": "no-store"
             }
           },
