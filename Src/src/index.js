@@ -207,6 +207,7 @@ export default {
           {
             headers: {
               "Authorization": `Bearer ${session.access_token}`,
+              "Deriv-App-ID": env.DERIV_CLIENT_ID,
               "Accept": "application/json"
             }
           }
