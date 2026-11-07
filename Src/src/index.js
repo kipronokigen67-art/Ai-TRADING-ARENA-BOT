@@ -41,6 +41,102 @@ function responseWithCookies(body, init = {}, cookies = []) {
 }
 
 
+
+async function handleTradingConnectionTest(request, env) {
+  const allowedOrigin = "https://ai-trading-arena-bot.dollarprinterchoosen.workers.dev";
+  if (request.headers.get("Origin") !== allowedOrigin) {
+    return Response.json({ connected: false, error: "origin_not_allowed" }, { status: 403 });
+  }
+  if (!env.TOKENS || !env.DERIV_CLIENT_ID) {
+    return Response.json({ connected: false, error: "server_setup_incomplete" }, { status: 500 });
+  }
+  let body;
+  try { body = await request.json(); } catch {
+    return Response.json({ connected: false, error: "invalid_request" }, { status: 400 });
+  }
+  const accountId = String(body?.account_id || "");
+  if (!/^DOT[0-9]{8,12}$/.test(accountId)) {
+    return Response.json({ connected: false, error: "invalid_account_id" }, { status: 400 });
+  }
+  const sessionId = readCookie(request, "ai_trading_session");
+  if (!sessionId) return Response.json({ connected: false, error: "not_connected" }, { status: 401 });
+  const saved = await env.TOKENS.get(`session:${sessionId}`);
+  if (!saved) return Response.json({ connected: false, error: "session_expired" }, { status: 401 });
+  const session = JSON.parse(saved);
+  if (!session.access_token || (session.expires_at && Date.now() >= session.expires_at)) {
+    await env.TOKENS.delete(`session:${sessionId}`);
+    return Response.json({ connected: false, error: "session_expired" }, { status: 401 });
+  }
+
+  const authHeaders = {
+    "Authorization": `Bearer ${session.access_token}`,
+    "Deriv-App-ID": env.DERIV_CLIENT_ID,
+    "Accept": "application/json"
+  };
+  const accountsResponse = await fetch("https://api.derivws.com/trading/v1/options/accounts", {
+    headers: authHeaders
+  });
+  if (!accountsResponse.ok) {
+    console.error("AI_TRADING_TEST stage=accounts_failed status=" + accountsResponse.status);
+    return Response.json({ connected: false, error: "accounts_verification_failed" }, { status: 502 });
+  }
+  const accountsPayload = await accountsResponse.json();
+  const account = Array.isArray(accountsPayload?.data)
+    ? accountsPayload.data.find(a => a?.account_id === accountId)
+    : null;
+  if (!account || account.status !== "active" || account.account_type !== "demo") {
+    return Response.json({ connected: false, error: "active_demo_account_required" }, { status: 403 });
+  }
+
+  const otpResponse = await fetch(
+    `https://api.derivws.com/trading/v1/options/accounts/${encodeURIComponent(accountId)}/otp`,
+    { method: "POST", headers: authHeaders }
+  );
+  let otpPayload;
+  try { otpPayload = await otpResponse.json(); } catch {
+    console.error("AI_TRADING_TEST stage=otp_invalid_json");
+    return Response.json({ connected: false, error: "otp_response_invalid" }, { status: 502 });
+  }
+  const wsUrl = otpPayload?.data?.url;
+  if (!otpResponse.ok || typeof wsUrl !== "string") {
+    console.error("AI_TRADING_TEST stage=otp_failed status=" + otpResponse.status);
+    return Response.json({ connected: false, error: "otp_request_failed" }, { status: 502 });
+  }
+  let parsed;
+  try { parsed = new URL(wsUrl); } catch {
+    return Response.json({ connected: false, error: "otp_url_invalid" }, { status: 502 });
+  }
+  if (parsed.protocol !== "wss:" || parsed.hostname !== "api.derivws.com" ||
+      parsed.pathname !== "/trading/v1/options/ws/demo" || !parsed.searchParams.get("otp")) {
+    return Response.json({ connected: false, error: "unexpected_websocket_endpoint" }, { status: 502 });
+  }
+
+  let upstreamResponse;
+  try {
+    upstreamResponse = await fetch(wsUrl, { headers: { "Upgrade": "websocket" } });
+  } catch (error) {
+    console.error("AI_TRADING_TEST stage=websocket_fetch_failed name=" + (error?.name || "Error"));
+    return Response.json({ connected: false, error: "websocket_fetch_failed" }, { status: 502 });
+  }
+  const upstream = upstreamResponse.webSocket;
+  if (upstreamResponse.status !== 101 || !upstream) {
+    console.error("AI_TRADING_TEST stage=websocket_upgrade_rejected status=" + upstreamResponse.status);
+    return Response.json({
+      connected: false,
+      error: "websocket_upgrade_rejected",
+      upstream_status: upstreamResponse.status
+    }, { status: 502 });
+  }
+  console.log("AI_TRADING_TEST stage=websocket_upgrade_success status=101");
+  try { upstream.accept(); upstream.close(1000, "Connection test complete"); } catch {}
+  return Response.json({
+    connected: true,
+    handshake_status: 101,
+    account_type: "demo",
+    message: "Deriv Demo WebSocket handshake succeeded. No proposal or buy request was sent."
+  }, { headers: { "Cache-Control": "no-store" } });
+}
+
 async function handleTradingSocket(request, env) {
   if (request.headers.get("Upgrade") !== "websocket") {
     return response("Expected a WebSocket upgrade.", 426);
@@ -447,6 +543,11 @@ export default {
             cookie("ai_trading_session", sessionId, expiresIn, "/")
           ]
         );
+      }
+
+      // Safe Demo WebSocket diagnostic. It never sends trading requests.
+      if (path === "/api/trading/test-connection" && request.method === "POST") {
+        return await handleTradingConnectionTest(request, env);
       }
 
       // Secure Demo-only WebSocket proxy. Deriv OTP and OAuth token stay server-side.
