@@ -1,0 +1,13 @@
+
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "ai-trading-arena-bot",
+  "main": "Src/src/index.js",
+  "compatibility_date": "2026-11-07",
+  "kv_namespaces": [
+    {
+      "binding": "TOKENS",
+      "id": "da6dbda858444dbf9e80f4a783e2dc51"
+    }
+  ]
+}
