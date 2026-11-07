@@ -182,6 +182,43 @@ export default {
         );
       }
 
+      // Retrieve the authenticated user's Options accounts (demo and real).
+      // The access token stays server-side and is never returned to the browser.
+      if (path === "/api/accounts" && request.method === "GET") {
+        const sessionId = readCookie(request, "ai_trading_session");
+        if (!sessionId || !env.TOKENS) {
+          return Response.json({ error: "not_connected" }, { status: 401 });
+        }
+
+        const saved = await env.TOKENS.get(`session:${sessionId}`);
+        if (!saved) {
+          return Response.json({ error: "session_expired" }, { status: 401 });
+        }
+
+        const session = JSON.parse(saved);
+        if (!session.access_token ||
+            (session.expires_at && Date.now() >= session.expires_at)) {
+          await env.TOKENS.delete(`session:${sessionId}`);
+          return Response.json({ error: "session_expired" }, { status: 401 });
+        }
+
+        const accountsResponse = await fetch(
+          "https://api.derivws.com/trading/v1/options/accounts",
+          {
+            headers: {
+              "Authorization": `Bearer ${session.access_token}`,
+              "Accept": "application/json"
+            }
+          }
+        );
+
+        const accountsData = await accountsResponse.json();
+        return Response.json(accountsData, {
+          status: accountsResponse.status,
+          headers: { "Cache-Control": "no-store" }
+        });
+      }
+
       // Check whether this browser has a connected Deriv session
       if (path === "/api/connection" && request.method === "GET") {
         const sessionId = readCookie(request, "ai_trading_session");
