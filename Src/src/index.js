@@ -176,7 +176,7 @@ async function handleTradingSocket(request, env) {
       if (!validSymbols.has(msg.underlying_symbol)) {
         return sendError(msg.req_id, "UNSUPPORTED_MARKET", "Deriv has not confirmed this market supports both digit contracts.");
       }
-      if (msg.basis !== "stake" || msg.currency !== account.currency ||
+      if (msg.basis !== "stake" || msg.currency !== (account.currency || "USD") ||
           msg.duration_unit !== "t" || !Number.isInteger(msg.duration) ||
           msg.duration < 1 || msg.duration > 6 || !Number.isFinite(amount) ||
           amount < 0.35 || amount > Math.min(risk.maxStake, cap)) {
@@ -246,6 +246,7 @@ async function handleTradingSocket(request, env) {
       if (meta) {
         openContracts.set(data.buy.contract_id, meta);
         buyRequests.delete(data.req_id);
+        upstream.send(JSON.stringify({ proposal_open_contract: 1, contract_id: data.buy.contract_id, subscribe: 1, req_id: ++nextInternalReqId }));
       }
     }
 
