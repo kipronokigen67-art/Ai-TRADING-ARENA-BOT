@@ -128,7 +128,7 @@ async function handleTradingConnectionTest(request, env) {
       const detail = await upstreamResponse.clone().json();
       const item = detail?.errors?.[0] || detail?.error || {};
       rejectionCode = String(item?.code || "unknown").slice(0, 80);
-      rejectionMessage = String(item?.message || "").replace(/[^\\x20-\\x7E]/g, "").slice(0, 160);
+      rejectionMessage = String(item?.message || "").replace(/[^ -~]/g, "").slice(0, 160);
     } catch {}
     console.error("AI_TRADING_TEST stage=websocket_upgrade_rejected status=" + upstreamResponse.status +
       " retry_after=" + (upstreamResponse.headers.get("retry-after") || "none") +
@@ -233,7 +233,7 @@ async function handleTradingSocket(request, env) {
       const detail = await upstreamResponse.clone().json();
       const item = detail?.errors?.[0] || detail?.error || {};
       rejectionCode = String(item?.code || "unknown").slice(0, 80);
-      rejectionMessage = String(item?.message || "").replace(/[^\\x20-\\x7E]/g, "").slice(0, 160);
+      rejectionMessage = String(item?.message || "").replace(/[^ -~]/g, "").slice(0, 160);
     } catch {}
     console.error("AI_TRADING_WS stage=upstream_upgrade_rejected status=" + upstreamResponse.status +
       " retry_after=" + (upstreamResponse.headers.get("retry-after") || "none") +
