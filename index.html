@@ -199,7 +199,7 @@ function connectTrading(){
     if(tradeSocket!==socket)return;
     let data;try{data=JSON.parse(event.data);}catch(e){return;}
     if(data.error){
-      if(data.echo_req?.contracts_for){contractChecksPending=Math.max(0,contractChecksPending-1);if(!tradeMarket&&contractChecksPending===0)['under','over'].forEach(id=>{botRuntime[id].active=false;document.getElementById(id+'-status').textContent='STOPPED';tradeOutput(id,'No active synthetic market supports both required digit contracts. No order was placed.');});}
+      if(data.echo_req?.contracts_for){contractChecksPending=Math.max(0,contractChecksPending-1);if(!tradeMarket&&contractChecksPending===0)['under','over'].forEach(id=>{botRuntime[id].active=false;document.getElementById(id+'-status').textContent='STOPPED';tradeOutput(id,'No active synthetic market supports this bot’s digit contract. No order was placed.');});}
       const msg=data.error.message||data.error.code||'Deriv rejected the request.';
       if(data.req_id&&proposalBotByReq.has(data.req_id)){
         const id=proposalBotByReq.get(data.req_id);proposalBotByReq.delete(data.req_id);botRuntime[id].pending=false;tradeOutput(id,'Proposal rejected: '+msg);
@@ -229,19 +229,19 @@ function connectTrading(){
     if(data.msg_type==='contracts_for'){
       const symbol=data.echo_req?.contracts_for;
       const available=Array.isArray(data.contracts_for?.available)?data.contracts_for.available:[];
-      const hasUnder=available.some(x=>x.contract_type==='DIGITUNDER');
-      const hasOver=available.some(x=>x.contract_type==='DIGITOVER');
-      if(!tradeMarket&&symbol&&hasUnder&&hasOver){
+      const requiredBots=['under','over'].filter(id=>botRuntime[id].active);
+      const supportsActiveBots=requiredBots.length>0&&requiredBots.every(id=>available.some(x=>x.contract_type===(id==='under'?'DIGITUNDER':'DIGITOVER')));
+      if(!tradeMarket&&symbol&&supportsActiveBots){
         const match=marketCandidates.find(x=>x.underlying_symbol===symbol);
         if(match){
           tradeMarket=symbol;tradePipSize=match.pip_size;
           sendTrade({ticks:tradeMarket,subscribe:1,req_id:++requestCounter});
-          ['under','over'].forEach(id=>{if(botRuntime[id].active)tradeOutput(id,'Demo execution active on '+(match.underlying_symbol_name||symbol)+'. Waiting for entry condition.');});
+          requiredBots.forEach(id=>tradeOutput(id,'Demo execution active on '+(match.underlying_symbol_name||symbol)+'. Waiting for entry condition.'));
         }
       }
       contractChecksPending=Math.max(0,contractChecksPending-1);
       if(!tradeMarket&&contractChecksPending===0){
-        ['under','over'].forEach(id=>{botRuntime[id].active=false;document.getElementById(id+'-status').textContent='STOPPED';tradeOutput(id,'No active synthetic market supports both required digit contracts. No order was placed.');});
+        ['under','over'].forEach(id=>{botRuntime[id].active=false;document.getElementById(id+'-status').textContent='STOPPED';tradeOutput(id,'No active synthetic market supports this bot’s digit contract. No order was placed.');});
       }
     }
     if(data.msg_type==='tick'&&data.tick&&tradeMarket){
