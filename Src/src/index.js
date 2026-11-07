@@ -2,7 +2,7 @@
 const DERIV_AUTHORIZE_URL = "https://auth.deriv.com/oauth2/auth";
 const DERIV_TOKEN_URL = "https://auth.deriv.com/oauth2/token";
 const CALLBACK_URL =
-  "https://ai-trading-arena-bot.kipronokigen67.workers.dev/auth/callback";
+  "https://ai-trading-arena-bot.dollarprinterchoosen.workers.dev/auth/callback";
 
 function cookie(name, value, maxAge = 600, path = "/auth") {
   return `${name}=${encodeURIComponent(value)}; HttpOnly; Secure; SameSite=Lax; Path=${path}; Max-Age=${maxAge}`;
