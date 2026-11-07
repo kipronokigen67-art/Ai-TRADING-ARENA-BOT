@@ -97,7 +97,7 @@ button:disabled{opacity:.55;cursor:not-allowed}
 </div>
 <section class="section testbench"><h2>Digit recognition & strategy test</h2><p class="subtitle">Test a supplied digit against both entry rules. This is not a live prediction or broker order.</p><div class="testrow"><div><label>Observed digit (0–9)</label><input id="test-digit" type="number" min="0" max="9" step="1" value="8"></div><button class="start" onclick="testDigit()">Test both bots</button></div><div class="output" id="test-output">Ready.</div></section>
 <section class="section"><h2>Performance & connection metrics</h2><div class="metrics"><div class="metric"><small>UNDER 7 signals tested</small><strong id="under-count">0</strong></div><div class="metric"><small>OVER 2 signals tested</small><strong id="over-count">0</strong></div><div class="metric"><small>Broker orders</small><strong id="broker-order-count">0</strong></div><div class="metric"><small>Deriv API</small><strong id="deriv-api-status">Not connected</strong></div></div></section>
-<footer>AI Trading · Demo-first execution workspace. Orders will only be recorded after Deriv confirms them. Trading involves risk; no profit is guaranteed.</footer></main>
+<footer>AI Trading · Demo-only execution. Orders and results are shown only after Deriv confirms them. Trading involves risk; no profit is guaranteed.</footer></main>
 <script>
 const counts={under:0,over:0};
 const connectionStatus=document.getElementById('connection-status');
@@ -144,16 +144,183 @@ function showSelectedAccount(){
   const a=derivAccounts.find(x=>x.account_id===selectedDerivAccountId);if(!a)return;
   accountBalance.textContent=Number(a.balance).toLocaleString(undefined,{style:'currency',currency:a.currency||'USD'});
   accountStatus.textContent=(a.account_type==='demo'?'DEMO ACCOUNT':'REAL ACCOUNT')+' · '+a.account_id+' · '+a.status.toUpperCase();
-  accountWarning.textContent=a.account_type==='real'?'REAL account selected. Real-money trading is not enabled by this selector.':'Demo is selected. This selector only displays account information; it does not start trading.';
+  accountWarning.textContent=a.account_type==='real'?'REAL account selected. Real-money trading is not enabled by this selector.':'Demo is selected. Starting a bot uses the selected Demo account. Real-account execution is disabled.';
 }
 accountSelect.addEventListener('change',()=>{const next=derivAccounts.find(a=>a.account_id===accountSelect.value);if(!next)return;if(next.account_type==='real'&&!window.confirm('Switch the displayed account to REAL? This does not place a trade, but the balance shown is real money. Continue?')){accountSelect.value=selectedDerivAccountId;return;}selectedDerivAccountId=next.account_id;showSelectedAccount();});
 async function refreshDerivAccounts(){try{const r=await fetch('/api/accounts',{credentials:'same-origin',cache:'no-store'});const data=await r.json();if(!r.ok)throw new Error(data?.errors?.[0]?.message||data?.error||'Account request failed');renderDerivAccounts(data);}catch(e){accountStatus.textContent='Could not load accounts: '+e.message;accountSelect.disabled=true;accountBalance.textContent='—';}}
 refreshDerivAccounts();
 setInterval(refreshDerivAccounts,30000);
 refreshDerivConnection();
+
+let tradeSocket=null, tradeMarket=null, tradePipSize=2, tradeCurrency="USD";
+let marketCandidates=[], contractChecksPending=0, requestCounter=100;
+const proposalBotByReq=new Map(), buyBotByReq=new Map();
+const botRuntime={
+  under:{active:false,pending:false,openContract:null,net:0,lossStreak:0,nextStake:1},
+  over:{active:false,pending:false,openContract:null,net:0,lossStreak:0,nextStake:1}
+};
 function cfg(id){return {stake:+document.getElementById(id+'-stake').value,stop:+document.getElementById(id+'-stop').value,mult:+document.getElementById(id+'-mart').value,take:+document.getElementById(id+'-take').value,duration:+document.getElementById(id+'-duration').value,cap:+document.getElementById(id+'-cap').value};}
 function qualifies(id,d){return id==='under'?(d===8||d===9):(d>=3&&d<=9);}
-function setBot(id,state){let c=cfg(id);if(state==='RUNNING'&&(![c.stake,c.stop,c.take,c.cap].every(Number.isFinite)||c.stake<=0||c.stop<0||c.take<0||c.cap<c.stake)){document.getElementById(id+'-output').textContent='Risk check blocked start: verify stake, stop-loss, take-profit and max stake cap.';return;}document.getElementById(id+'-status').textContent=state;document.getElementById(id+'-output').textContent=state==='RUNNING'?'Dashboard controls armed locally. No Deriv connection or order execution is active.':state==='PAUSED'?'Paused locally.':'Stopped locally.';}
+function tradeOutput(id,message){document.getElementById(id+'-output').textContent=message;}
+function sendTrade(message){if(!tradeSocket||tradeSocket.readyState!==WebSocket.OPEN)return false;tradeSocket.send(JSON.stringify(message));return true;}
+function currentDemoAccount(){return derivAccounts.find(a=>a.account_id===selectedDerivAccountId&&a.account_type==='demo'&&a.status==='active');}
+function sendRiskConfig(){
+  const u=cfg('under'),o=cfg('over');
+  sendTrade({ai_trading_config:{
+    stop_loss:Math.min(u.stop,o.stop),take_profit:Math.min(u.take,o.take),
+    max_stake:10,under_cap:u.cap,over_cap:o.cap
+  }});
+}
+function connectTrading(){
+  if(tradeSocket&&[WebSocket.OPEN,WebSocket.CONNECTING].includes(tradeSocket.readyState))return;
+  const account=currentDemoAccount();
+  if(!account){tradeOutput('under','Select an active Demo account before starting a bot.');return;}
+  tradeCurrency=account.currency||'USD';
+  const wsProtocol=location.protocol==='https:'?'wss:':'ws:';
+  const socket=new WebSocket(wsProtocol+'//'+location.host+'/api/trading/ws?account_id='+encodeURIComponent(account.account_id));
+  tradeSocket=socket;
+  tradeOutput('under','Connecting securely to Deriv Demo…');
+  socket.onopen=()=>{
+    if(tradeSocket!==socket)return;
+    sendRiskConfig();
+    sendTrade({active_symbols:'brief',req_id:++requestCounter});
+    ['under','over'].forEach(id=>{if(botRuntime[id].active)sendTrade({ai_bot_state:{bot:id,state:'RUNNING'}});});
+  };
+  socket.onmessage=event=>{
+    if(tradeSocket!==socket)return;
+    let data;try{data=JSON.parse(event.data);}catch(e){return;}
+    if(data.error){
+      const msg=data.error.message||data.error.code||'Deriv rejected the request.';
+      if(data.req_id&&proposalBotByReq.has(data.req_id)){
+        const id=proposalBotByReq.get(data.req_id);proposalBotByReq.delete(data.req_id);botRuntime[id].pending=false;tradeOutput(id,'Proposal rejected: '+msg);
+      }
+      if(data.req_id&&buyBotByReq.has(data.req_id)){
+        const id=buyBotByReq.get(data.req_id);buyBotByReq.delete(data.req_id);botRuntime[id].pending=false;tradeOutput(id,'Order rejected: '+msg);
+      }
+      if(!data.req_id){tradeOutput('under','Deriv connection: '+msg);tradeOutput('over','Deriv connection: '+msg);}
+      return;
+    }
+    if(data.ai_risk_status){
+      const p=Number(data.ai_risk_status.net_profit||0);
+      const label='Demo session P/L: '+(p>=0?'+':'')+'$'+p.toFixed(2);
+      ['under','over'].forEach(id=>{if(botRuntime[id].active)tradeOutput(id,label+' · waiting for the next qualifying digit.');});
+    }
+    if(data.ai_risk_halt){
+      ['under','over'].forEach(id=>{botRuntime[id].active=false;document.getElementById(id+'-status').textContent='STOPPED';tradeOutput(id,'Automatic stop: Demo session risk limit reached. No new orders will be sent.');});
+    }
+    if(data.msg_type==='active_symbols'){
+      const symbols=Array.isArray(data.active_symbols)?data.active_symbols:[];
+      marketCandidates=symbols.filter(x=>x.market==='synthetic_index'&&x.underlying_symbol&&x.exchange_is_open===1&&!x.is_trading_suspended);
+      marketCandidates.sort((a,b)=>(/^1HZ/i.test(b.underlying_symbol)?1:0)-(/^1HZ/i.test(a.underlying_symbol)?1:0));
+      if(!marketCandidates.length){['under','over'].forEach(id=>{botRuntime[id].active=false;document.getElementById(id+'-status').textContent='STOPPED';tradeOutput(id,'Deriv returned no active synthetic markets for this Demo account. No order was placed.');});return;}
+      contractChecksPending=marketCandidates.length;
+      marketCandidates.forEach((item,index)=>sendTrade({contracts_for:item.underlying_symbol,req_id:++requestCounter}));
+    }
+    if(data.msg_type==='contracts_for'){
+      const symbol=data.echo_req?.contracts_for;
+      const available=Array.isArray(data.contracts_for?.available)?data.contracts_for.available:[];
+      const hasUnder=available.some(x=>x.contract_type==='DIGITUNDER');
+      const hasOver=available.some(x=>x.contract_type==='DIGITOVER');
+      if(!tradeMarket&&symbol&&hasUnder&&hasOver){
+        const match=marketCandidates.find(x=>x.underlying_symbol===symbol);
+        if(match){
+          tradeMarket=symbol;tradePipSize=match.pip_size;
+          sendTrade({ticks:tradeMarket,subscribe:1,req_id:++requestCounter});
+          ['under','over'].forEach(id=>{if(botRuntime[id].active)tradeOutput(id,'Demo execution active on '+(match.underlying_symbol_name||symbol)+'. Waiting for entry condition.');});
+        }
+      }
+      contractChecksPending=Math.max(0,contractChecksPending-1);
+      if(!tradeMarket&&contractChecksPending===0){
+        ['under','over'].forEach(id=>{botRuntime[id].active=false;document.getElementById(id+'-status').textContent='STOPPED';tradeOutput(id,'No active synthetic market supports both required digit contracts. No order was placed.');});
+      }
+    }
+    if(data.msg_type==='tick'&&data.tick&&tradeMarket){
+      const decimals=Number.isFinite(tradePipSize)&&tradePipSize>0?Math.max(0,Math.min(10,Math.round(-Math.log10(tradePipSize)))):2;
+      const quote=Number(data.tick.quote);
+      const formatted=Number.isFinite(quote)?quote.toFixed(decimals):String(data.tick.quote);
+      const digits=formatted.match(/[0-9]/g)||[];
+      const digit=digits.length?Number(digits[digits.length-1]):NaN;
+      if(!Number.isInteger(digit))return;
+      ['under','over'].forEach(id=>{
+        const rt=botRuntime[id];
+        if(!rt.active||rt.pending||rt.openContract||!qualifies(id,digit))return;
+        const c=cfg(id);
+        const amount=Number(rt.nextStake||c.stake);
+        if(!Number.isFinite(amount)||amount<=0||amount>c.cap||amount>10){rt.active=false;document.getElementById(id+'-status').textContent='STOPPED';tradeOutput(id,'Risk check stopped the bot: stake exceeds its configured cap.');return;}
+        const reqId=++requestCounter;
+        rt.pending=true;proposalBotByReq.set(reqId,id);
+        tradeOutput(id,'Entry condition met on digit '+digit+'. Requesting Deriv price…');
+        sendTrade({proposal:1,amount,basis:'stake',contract_type:id==='under'?'DIGITUNDER':'DIGITOVER',
+          currency:tradeCurrency,underlying_symbol:tradeMarket,barrier:id==='under'?'7':'2',
+          duration:c.duration,duration_unit:'t',req_id:reqId,passthrough:{bot_id:id}});
+      });
+    }
+    if(data.msg_type==='proposal'&&data.proposal){
+      const id=proposalBotByReq.get(data.req_id);
+      if(!id)return;
+      proposalBotByReq.delete(data.req_id);
+      const ask=Number(data.proposal.ask_price);
+      if(!data.proposal.id||!Number.isFinite(ask)||ask<=0){botRuntime[id].pending=false;tradeOutput(id,'Deriv did not return a valid price. No order was placed.');return;}
+      const reqId=++requestCounter;buyBotByReq.set(reqId,id);
+      sendTrade({buy:data.proposal.id,price:ask,req_id:reqId,passthrough:{bot_id:id}});
+      tradeOutput(id,'Deriv quote received. Submitting Demo order…');
+    }
+    if(data.msg_type==='buy'&&data.buy){
+      const id=buyBotByReq.get(data.req_id);
+      if(!id)return;
+      buyBotByReq.delete(data.req_id);
+      const contractId=data.buy.contract_id;
+      if(!contractId){botRuntime[id].pending=false;tradeOutput(id,'Deriv did not confirm a contract ID. Check the broker account.');return;}
+      botRuntime[id].pending=false;botRuntime[id].openContract=contractId;
+      const orders=document.getElementById('broker-order-count');
+      orders.textContent=String((Number(orders.textContent)||0)+1);
+      tradeOutput(id,'<b>Demo order confirmed</b> · Contract '+contractId+' · Stake $'+Number(data.buy.buy_price||0).toFixed(2)+'. Monitoring settlement.');
+      sendTrade({proposal_open_contract:1,contract_id:contractId,subscribe:1,req_id:++requestCounter});
+    }
+    if(data.msg_type==='proposal_open_contract'&&data.proposal_open_contract){
+      const contract=data.proposal_open_contract, id=Object.keys(botRuntime).find(k=>botRuntime[k].openContract===contract.contract_id);
+      if(!id)return;
+      const terminal=contract.is_sold===1||contract.is_sold===true||['won','lost','sold','expired'].includes(String(contract.status||'').toLowerCase());
+      if(!terminal)return;
+      const rt=botRuntime[id],profit=Number(contract.profit);
+      if(Number.isFinite(profit)){
+        rt.net=Number((rt.net+profit).toFixed(2));
+        const c=cfg(id);
+        if(profit<0){rt.lossStreak++;rt.nextStake=Math.min(c.stake*Math.pow(c.mult,rt.lossStreak),c.cap);}
+        else{rt.lossStreak=0;rt.nextStake=c.stake;}
+        tradeOutput(id,'Contract '+contract.contract_id+' settled '+String(contract.status||'')+'. Result '+(profit>=0?'+':'')+'$'+profit.toFixed(2)+' · Bot P/L '+(rt.net>=0?'+':'')+'$'+rt.net.toFixed(2)+'.');
+        rt.openContract=null;
+        if(rt.net<=-c.stop||rt.net>=c.take){rt.active=false;document.getElementById(id+'-status').textContent='STOPPED';sendTrade({ai_bot_state:{bot:id,state:'STOPPED'}});tradeOutput(id,'Risk limit reached. Bot stopped. Session result '+(rt.net>=0?'+':'')+'$'+rt.net.toFixed(2)+'.');}
+      }
+    }
+  };
+  socket.onerror=()=>{['under','over'].forEach(id=>{if(botRuntime[id].active)tradeOutput(id,'Demo trading connection error. No new trades can be sent.');});};
+  socket.onclose=()=>{if(tradeSocket!==socket)return;tradeSocket=null;tradeMarket=null;['under','over'].forEach(id=>{botRuntime[id].active=false;botRuntime[id].pending=false;document.getElementById(id+'-status').textContent='STOPPED';tradeOutput(id,'Deriv connection closed. Bot stopped; open contracts settle at Deriv.');});};
+}
+function setBot(id,state){
+  const c=cfg(id),rt=botRuntime[id];
+  if(state==='RUNNING'){
+    const account=currentDemoAccount();
+    if(!account){tradeOutput(id,'Trading is Demo-only. Select your active Demo account first.');return;}
+    if(![c.stake,c.stop,c.take,c.cap,c.mult,c.duration].every(Number.isFinite)||c.stake<0.35||c.stop<=0||c.take<=0||c.cap<c.stake||c.cap>10||c.stop>10||c.take>10||c.duration<1||c.duration>6){
+      tradeOutput(id,'Risk check blocked start. Use a stake of at least $0.35, cap no higher than $10, and stop-loss/take-profit between $0.01 and $10.');return;
+    }
+    rt.nextStake=c.stake;rt.lossStreak=0;rt.active=true;
+    document.getElementById(id+'-status').textContent='CONNECTING';
+    tradeOutput(id,'Starting Demo execution. Connecting to Deriv…');
+    connectTrading();
+    if(tradeSocket&&tradeSocket.readyState===WebSocket.OPEN){
+      sendRiskConfig();sendTrade({ai_bot_state:{bot:id,state:'RUNNING'}});
+      document.getElementById(id+'-status').textContent='RUNNING';
+      if(tradeMarket)tradeOutput(id,'Demo execution active on '+tradeMarket+'. Waiting for entry condition.');
+    }
+    return;
+  }
+  rt.active=false;
+  sendTrade({ai_bot_state:{bot:id,state}});
+  document.getElementById(id+'-status').textContent=state;
+  tradeOutput(id,state==='PAUSED'?'Paused. Any open contract will settle at Deriv; no new entries will be sent.':'Stopped. Any open contract will settle at Deriv; no new entries will be sent.');
+}
 function testDigit(){let raw=document.getElementById('test-digit').value,d=Number(raw),out=document.getElementById('test-output');if(raw===''||!Number.isInteger(d)||d<0||d>9){out.textContent='Enter one whole digit from 0 to 9.';return;}['under','over'].forEach(id=>{let ok=qualifies(id,d),c=cfg(id);if(ok)counts[id]++;document.getElementById(id+'-count').textContent=counts[id];document.getElementById(id+'-output').textContent=ok?`Digit ${d}: entry filter passes. ${id==='under'?'DIGITUNDER barrier 7':'DIGITOVER barrier 2'} · ${c.duration} tick(s) · stake $${c.stake.toFixed(2)} · multiplier ${c.mult}× · configured cap $${c.cap.toFixed(2)}. No order submitted.`:`Digit ${d}: no entry for this bot.`;});out.textContent=`Recognized digit ${d}. UNDER 7: ${qualifies('under',d)?'qualifies':'no entry'}. OVER 2: ${qualifies('over',d)?'qualifies':'no entry'}. The contract outcome is determined by the expiry digit, not the entry digit.`;}
 </script>
   
