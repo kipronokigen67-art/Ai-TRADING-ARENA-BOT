@@ -81,19 +81,44 @@ async function handleTradingSocket(request, env) {
       "Accept": "application/json"
     } }
   );
-  const otpPayload = await otpResponse.json();
+  let otpPayload;
+  try {
+    otpPayload = await otpResponse.json();
+  } catch (error) {
+    console.error("AI_TRADING_WS stage=otp_response_json_failed");
+    return Response.json({ error: "otp_response_invalid" }, { status: 502 });
+  }
   const wsUrl = otpPayload?.data?.url;
   if (!otpResponse.ok || typeof wsUrl !== "string") {
+    console.error("AI_TRADING_WS stage=otp_request_failed status=" + otpResponse.status);
     return Response.json({ error: "otp_request_failed" }, { status: otpResponse.status || 502 });
   }
-  const parsedWsUrl = new URL(wsUrl);
+  let parsedWsUrl;
+  try {
+    parsedWsUrl = new URL(wsUrl);
+  } catch {
+    console.error("AI_TRADING_WS stage=otp_url_invalid");
+    return Response.json({ error: "otp_url_invalid" }, { status: 502 });
+  }
   if (parsedWsUrl.protocol !== "wss:" || parsedWsUrl.hostname !== "api.derivws.com" ||
-      parsedWsUrl.pathname !== "/trading/v1/options/ws/demo") {
+      parsedWsUrl.pathname !== "/trading/v1/options/ws/demo" ||
+      !parsedWsUrl.searchParams.get("otp")) {
+    console.error("AI_TRADING_WS stage=otp_url_validation_failed");
     return Response.json({ error: "unexpected_websocket_endpoint" }, { status: 502 });
   }
-  const upstreamResponse = await fetch(wsUrl, { headers: { "Upgrade": "websocket" } });
+  let upstreamResponse;
+  try {
+    upstreamResponse = await fetch(wsUrl, { headers: { "Upgrade": "websocket" } });
+  } catch (error) {
+    console.error("AI_TRADING_WS stage=upstream_fetch_failed name=" + (error?.name || "Error"));
+    return Response.json({ error: "deriv_websocket_fetch_failed" }, { status: 502 });
+  }
   const upstream = upstreamResponse.webSocket;
-  if (!upstream) return Response.json({ error: "deriv_websocket_upgrade_failed" }, { status: 502 });
+  if (upstreamResponse.status !== 101 || !upstream) {
+    console.error("AI_TRADING_WS stage=upstream_upgrade_rejected status=" + upstreamResponse.status);
+    return Response.json({ error: "deriv_websocket_upgrade_failed", upstream_status: upstreamResponse.status }, { status: 502 });
+  }
+  console.log("AI_TRADING_WS stage=upstream_upgrade_success status=101");
 
   const pair = new WebSocketPair();
   const client = pair[0];
