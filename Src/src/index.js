@@ -113,9 +113,11 @@ async function handleTradingConnectionTest(request, env) {
 
   let upstreamResponse;
   try {
-    upstreamResponse = await fetch(wsUrl, { headers: { "Upgrade": "websocket" } });
+    const upstreamHttpUrl = new URL(wsUrl);
+    upstreamHttpUrl.protocol = "https:";
+    upstreamResponse = await fetch(upstreamHttpUrl.toString(), { headers: { "Upgrade": "websocket" } });
   } catch (error) {
-    console.error("AI_TRADING_TEST stage=websocket_fetch_failed name=" + (error?.name || "Error"));
+    console.error("AI_TRADING_TEST stage=websocket_fetch_failed name=" + (error?.name || "Error") + " message=" + String(error?.message || "").slice(0,180));
     return Response.json({ connected: false, error: "websocket_fetch_failed" }, { status: 502 });
   }
   const upstream = upstreamResponse.webSocket;
@@ -204,9 +206,11 @@ async function handleTradingSocket(request, env) {
   }
   let upstreamResponse;
   try {
-    upstreamResponse = await fetch(wsUrl, { headers: { "Upgrade": "websocket" } });
+    const upstreamHttpUrl = new URL(wsUrl);
+    upstreamHttpUrl.protocol = "https:";
+    upstreamResponse = await fetch(upstreamHttpUrl.toString(), { headers: { "Upgrade": "websocket" } });
   } catch (error) {
-    console.error("AI_TRADING_WS stage=upstream_fetch_failed name=" + (error?.name || "Error"));
+    console.error("AI_TRADING_WS stage=upstream_fetch_failed name=" + (error?.name || "Error") + " message=" + String(error?.message || "").slice(0,180));
     return Response.json({ error: "deriv_websocket_fetch_failed" }, { status: 502 });
   }
   const upstream = upstreamResponse.webSocket;
