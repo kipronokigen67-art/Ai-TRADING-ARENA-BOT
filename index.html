@@ -169,9 +169,15 @@ function sendTrade(message){if(!tradeSocket||tradeSocket.readyState!==WebSocket.
 function currentDemoAccount(){return derivAccounts.find(a=>a.account_id===selectedDerivAccountId&&a.account_type==='demo'&&a.status==='active');}
 function sendRiskConfig(){
   const u=cfg('under'),o=cfg('over');
+  const active=['under','over'].filter(id=>botRuntime[id].active).map(cfg);
+  const stops=active.map(c=>c.stop).filter(v=>Number.isFinite(v)&&v>0&&v<=10);
+  const takes=active.map(c=>c.take).filter(v=>Number.isFinite(v)&&v>0&&v<=10);
+  const underCap=Number.isFinite(u.cap)&&u.cap>=0.35&&u.cap<=10?u.cap:10;
+  const overCap=Number.isFinite(o.cap)&&o.cap>=0.35&&o.cap<=10?o.cap:10;
   sendTrade({ai_trading_config:{
-    stop_loss:Math.min(u.stop,o.stop),take_profit:Math.min(u.take,o.take),
-    max_stake:10,under_cap:u.cap,over_cap:o.cap
+    stop_loss:stops.length?Math.min(...stops):10,
+    take_profit:takes.length?Math.min(...takes):10,
+    max_stake:10,under_cap:underCap,over_cap:overCap
   }});
 }
 function connectTrading(){
