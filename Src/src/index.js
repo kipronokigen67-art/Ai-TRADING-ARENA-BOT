@@ -110,7 +110,7 @@ async function handleTradingSocket(request, env) {
     try { risk = { ...risk, ...JSON.parse(storedRisk) }; } catch {}
   }
   const activeBots = new Set();
-  const validSymbols = new Set();
+  const validContracts = new Map();
   const proposals = new Map();
   const proposalRequests = new Map();
   const buyRequests = new Map();
@@ -176,7 +176,7 @@ async function handleTradingSocket(request, env) {
         sendClient({ ai_risk_halt: { net_profit: risk.netProfit } });
         return sendError(msg.req_id, "RISK_LIMIT_REACHED", "Daily Demo risk limit reached. Bots have been stopped.");
       }
-      if (!validSymbols.has(msg.underlying_symbol)) {
+      if (!validContracts.get(msg.underlying_symbol)?.has(expectedType)) {
         return sendError(msg.req_id, "UNSUPPORTED_MARKET", "Deriv has not confirmed this market supports both digit contracts.");
       }
       if (msg.basis !== "stake" || msg.currency !== (account.currency || "USD") ||
@@ -226,9 +226,7 @@ async function handleTradingSocket(request, env) {
     if (data.msg_type === "contracts_for") {
       const symbol = data.echo_req?.contracts_for;
       const available = Array.isArray(data.contracts_for?.available) ? data.contracts_for.available : [];
-      const hasUnder = available.some(x => x.contract_type === "DIGITUNDER");
-      const hasOver = available.some(x => x.contract_type === "DIGITOVER");
-      if (symbol && hasUnder && hasOver) validSymbols.add(symbol);
+      if (symbol) validContracts.set(symbol, new Set(available.map(x => x.contract_type)));
     }
 
     if (data.error && data.req_id) { proposalRequests.delete(data.req_id); buyRequests.delete(data.req_id); }
