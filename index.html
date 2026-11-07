@@ -90,7 +90,8 @@ connectButton.addEventListener('click',()=>{window.location.assign('/auth/login'
 disconnectButton.addEventListener('click',async()=>{
   disconnectButton.disabled=true;
   try{await fetch('/auth/logout',{method:'POST',credentials:'same-origin'});}
-  finally{disconnectButton.disabled=false;await refreshDerivConnection();
+  finally{disconnectButton.disabled=false;await refreshDerivConnection();}
+});
 let derivAccounts=[];
 let selectedDerivAccountId='';
 const accountSelect=document.getElementById('account-select');
@@ -117,8 +118,7 @@ function showSelectedAccount(){
 accountSelect.addEventListener('change',()=>{const next=derivAccounts.find(a=>a.account_id===accountSelect.value);if(!next)return;if(next.account_type==='real'&&!window.confirm('Switch the displayed account to REAL? This does not place a trade, but the balance shown is real money. Continue?')){accountSelect.value=selectedDerivAccountId;return;}selectedDerivAccountId=next.account_id;showSelectedAccount();});
 async function refreshDerivAccounts(){try{const r=await fetch('/api/accounts',{credentials:'same-origin',cache:'no-store'});const data=await r.json();if(!r.ok)throw new Error(data?.errors?.[0]?.message||data?.error||'Account request failed');renderDerivAccounts(data);}catch(e){accountStatus.textContent='Could not load accounts: '+e.message;accountSelect.disabled=true;accountBalance.textContent='—';}}
 refreshDerivAccounts();
-setInterval(refreshDerivAccounts,30000);}
-});
+setInterval(refreshDerivAccounts,30000);
 refreshDerivConnection();
 function cfg(id){return {stake:+document.getElementById(id+'-stake').value,stop:+document.getElementById(id+'-stop').value,mult:+document.getElementById(id+'-mart').value,take:+document.getElementById(id+'-take').value,duration:+document.getElementById(id+'-duration').value,cap:+document.getElementById(id+'-cap').value};}
 function qualifies(id,d){return id==='under'?(d===8||d===9):(d>=3&&d<=9);}
