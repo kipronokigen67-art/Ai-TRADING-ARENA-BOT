@@ -128,8 +128,7 @@ async function handleTradingSocket(request, env) {
 
   const day = new Date().toISOString().slice(0, 10);
   const riskKey = `risk:${sessionId}:${accountId}:${day}`;
-  let risk = { netProfit: 0, stopLoss: 10, takeProfit: 10, maxStake: 10,
-    botCaps: { under: 10, over: 10 }, settled: [] };
+  let risk = { netProfit: 0, stopLoss: 10, takeProfit: 10, maxStake: 10, settled: [] };
   const storedRisk = await env.TOKENS.get(riskKey);
   if (storedRisk) {
     try { risk = { ...risk, ...JSON.parse(storedRisk) }; } catch {}
@@ -161,14 +160,13 @@ async function handleTradingSocket(request, env) {
 
     if (msg?.ai_trading_config) {
       const c = msg.ai_trading_config;
-      const values = [c.stop_loss, c.take_profit, c.max_stake, c.under_cap, c.over_cap].map(Number);
+      const values = [c.stop_loss, c.take_profit, c.max_stake].map(Number);
       if (values.some(v => !Number.isFinite(v) || v <= 0 || v > 10)) {
-        return sendError(null, "RISK_LIMIT", "Stop-loss, take-profit and stake caps must be greater than zero and no more than $10.");
+        return sendError(null, "RISK_LIMIT", "Stop-loss, take-profit and maximum stake must be greater than zero and no more than $10.");
       }
       risk.stopLoss = values[0];
       risk.takeProfit = values[1];
       risk.maxStake = values[2];
-      risk.botCaps = { under: values[3], over: values[4] };
       await saveRisk();
       sendClient({ ai_risk_status: { net_profit: risk.netProfit, stop_loss: risk.stopLoss,
         take_profit: risk.takeProfit, max_stake: risk.maxStake, halted: halted() } });
@@ -177,7 +175,7 @@ async function handleTradingSocket(request, env) {
 
     if (msg?.ai_bot_state) {
       const { bot, state } = msg.ai_bot_state;
-      if (!["under", "over"].includes(bot) || !["RUNNING", "PAUSED", "STOPPED"].includes(state)) {
+      if (bot !== "over" || !["RUNNING", "PAUSED", "STOPPED"].includes(state)) {
         return sendError(null, "INVALID_BOT_STATE", "Invalid bot state.");
       }
       if (state === "RUNNING" && !halted()) activeBots.add(bot);
@@ -189,10 +187,10 @@ async function handleTradingSocket(request, env) {
 
     if (msg?.proposal) {
       const bot = msg.passthrough?.bot_id;
-      const expectedType = bot === "under" ? "DIGITUNDER" : bot === "over" ? "DIGITOVER" : "";
-      const expectedBarrier = bot === "under" ? "7" : bot === "over" ? "2" : "";
+      const expectedType = bot === "over" ? "DIGITOVER" : "";
+      const expectedBarrier = "2";
       const amount = Number(msg.amount);
-      const cap = bot === "under" ? risk.botCaps.under : risk.botCaps.over;
+      const cap = risk.maxStake;
       if (!activeBots.has(bot) || msg.contract_type !== expectedType || String(msg.barrier) !== expectedBarrier) {
         return sendError(msg.req_id, "BOT_NOT_ARMED", "This bot is not armed for that contract.");
       }
@@ -202,7 +200,7 @@ async function handleTradingSocket(request, env) {
         return sendError(msg.req_id, "RISK_LIMIT_REACHED", "Daily Demo risk limit reached. Bots have been stopped.");
       }
       if (!validContracts.get(msg.underlying_symbol)?.has(expectedType)) {
-        return sendError(msg.req_id, "UNSUPPORTED_MARKET", "Deriv has not confirmed this market supports both digit contracts.");
+        return sendError(msg.req_id, "UNSUPPORTED_MARKET", "Deriv has not confirmed this market supports DIGITOVER.");
       }
       if (msg.basis !== "stake" || msg.currency !== (account.currency || "USD") ||
           msg.duration_unit !== "t" || !Number.isInteger(msg.duration) ||
