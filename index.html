@@ -120,6 +120,7 @@ async function refreshDerivConnection(){
 connectButton.addEventListener('click',()=>{window.location.assign('/auth/login');});
 disconnectButton.addEventListener('click',async()=>{
   disconnectButton.disabled=true;
+  if(tradeSocket)tradeSocket.close();
   try{await fetch('/auth/logout',{method:'POST',credentials:'same-origin'});}
   finally{disconnectButton.disabled=false;await refreshDerivConnection();}
 });
@@ -146,7 +147,7 @@ function showSelectedAccount(){
   accountStatus.textContent=(a.account_type==='demo'?'DEMO ACCOUNT':'REAL ACCOUNT')+' · '+a.account_id+' · '+a.status.toUpperCase();
   accountWarning.textContent=a.account_type==='real'?'REAL account selected. Real-money trading is not enabled by this selector.':'Demo is selected. Starting a bot uses the selected Demo account. Real-account execution is disabled.';
 }
-accountSelect.addEventListener('change',()=>{const next=derivAccounts.find(a=>a.account_id===accountSelect.value);if(!next)return;if(next.account_type==='real'&&!window.confirm('Switch the displayed account to REAL? This does not place a trade, but the balance shown is real money. Continue?')){accountSelect.value=selectedDerivAccountId;return;}selectedDerivAccountId=next.account_id;showSelectedAccount();});
+accountSelect.addEventListener('change',()=>{const next=derivAccounts.find(a=>a.account_id===accountSelect.value);if(!next)return;if(window.botRuntime&&Object.values(window.botRuntime).some(x=>x.active)){accountSelect.value=selectedDerivAccountId;accountWarning.textContent='Stop both bots before changing accounts.';return;}if(next.account_type==='real'&&!window.confirm('Switch the displayed account to REAL? Real-money trading remains disabled. Continue?')){accountSelect.value=selectedDerivAccountId;return;}if(window.tradeSocket)window.tradeSocket.close();selectedDerivAccountId=next.account_id;showSelectedAccount();});
 async function refreshDerivAccounts(){try{const r=await fetch('/api/accounts',{credentials:'same-origin',cache:'no-store'});const data=await r.json();if(!r.ok)throw new Error(data?.errors?.[0]?.message||data?.error||'Account request failed');renderDerivAccounts(data);}catch(e){accountStatus.textContent='Could not load accounts: '+e.message;accountSelect.disabled=true;accountBalance.textContent='—';}}
 refreshDerivAccounts();
 setInterval(refreshDerivAccounts,30000);
@@ -159,6 +160,8 @@ const botRuntime={
   under:{active:false,pending:false,openContract:null,net:0,lossStreak:0,nextStake:1},
   over:{active:false,pending:false,openContract:null,net:0,lossStreak:0,nextStake:1}
 };
+window.botRuntime=botRuntime;
+window.tradeSocket=null;
 function cfg(id){return {stake:+document.getElementById(id+'-stake').value,stop:+document.getElementById(id+'-stop').value,mult:+document.getElementById(id+'-mart').value,take:+document.getElementById(id+'-take').value,duration:+document.getElementById(id+'-duration').value,cap:+document.getElementById(id+'-cap').value};}
 function qualifies(id,d){return id==='under'?(d===8||d===9):(d>=3&&d<=9);}
 function tradeOutput(id,message){document.getElementById(id+'-output').textContent=message;}
@@ -178,18 +181,19 @@ function connectTrading(){
   tradeCurrency=account.currency||'USD';
   const wsProtocol=location.protocol==='https:'?'wss:':'ws:';
   const socket=new WebSocket(wsProtocol+'//'+location.host+'/api/trading/ws?account_id='+encodeURIComponent(account.account_id));
-  tradeSocket=socket;
+  tradeSocket=socket;window.tradeSocket=socket;
   tradeOutput('under','Connecting securely to Deriv Demo…');
   socket.onopen=()=>{
     if(tradeSocket!==socket)return;
     sendRiskConfig();
     sendTrade({active_symbols:'brief',req_id:++requestCounter});
-    ['under','over'].forEach(id=>{if(botRuntime[id].active)sendTrade({ai_bot_state:{bot:id,state:'RUNNING'}});});
+    ['under','over'].forEach(id=>{if(botRuntime[id].active){sendTrade({ai_bot_state:{bot:id,state:'RUNNING'}});document.getElementById(id+'-status').textContent='RUNNING';tradeOutput(id,'Connected to Deriv Demo. Checking digit contract availability…');}});
   };
   socket.onmessage=event=>{
     if(tradeSocket!==socket)return;
     let data;try{data=JSON.parse(event.data);}catch(e){return;}
     if(data.error){
+      if(data.echo_req?.contracts_for){contractChecksPending=Math.max(0,contractChecksPending-1);if(!tradeMarket&&contractChecksPending===0)['under','over'].forEach(id=>{botRuntime[id].active=false;document.getElementById(id+'-status').textContent='STOPPED';tradeOutput(id,'No active synthetic market supports both required digit contracts. No order was placed.');});}
       const msg=data.error.message||data.error.code||'Deriv rejected the request.';
       if(data.req_id&&proposalBotByReq.has(data.req_id)){
         const id=proposalBotByReq.get(data.req_id);proposalBotByReq.delete(data.req_id);botRuntime[id].pending=false;tradeOutput(id,'Proposal rejected: '+msg);
@@ -295,7 +299,7 @@ function connectTrading(){
     }
   };
   socket.onerror=()=>{['under','over'].forEach(id=>{if(botRuntime[id].active)tradeOutput(id,'Demo trading connection error. No new trades can be sent.');});};
-  socket.onclose=()=>{if(tradeSocket!==socket)return;tradeSocket=null;tradeMarket=null;['under','over'].forEach(id=>{botRuntime[id].active=false;botRuntime[id].pending=false;document.getElementById(id+'-status').textContent='STOPPED';tradeOutput(id,'Deriv connection closed. Bot stopped; open contracts settle at Deriv.');});};
+  socket.onclose=()=>{if(tradeSocket!==socket)return;tradeSocket=null;window.tradeSocket=null;tradeMarket=null;['under','over'].forEach(id=>{botRuntime[id].active=false;botRuntime[id].pending=false;document.getElementById(id+'-status').textContent='STOPPED';tradeOutput(id,'Deriv connection closed. Bot stopped; open contracts settle at Deriv.');});};
 }
 function setBot(id,state){
   const c=cfg(id),rt=botRuntime[id];
