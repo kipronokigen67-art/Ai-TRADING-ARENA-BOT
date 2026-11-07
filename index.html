@@ -278,8 +278,8 @@ function connectTrading(){
       botRuntime[id].pending=false;botRuntime[id].openContract=contractId;
       const orders=document.getElementById('broker-order-count');
       orders.textContent=String((Number(orders.textContent)||0)+1);
-      tradeOutput(id,'<b>Demo order confirmed</b> · Contract '+contractId+' · Stake $'+Number(data.buy.buy_price||0).toFixed(2)+'. Monitoring settlement.');
-      sendTrade({proposal_open_contract:1,contract_id:contractId,subscribe:1,req_id:++requestCounter});
+      tradeOutput(id,'Demo order confirmed · Contract '+contractId+' · Stake $'+Number(data.buy.buy_price||0).toFixed(2)+'. Monitoring settlement.');
+      
     }
     if(data.msg_type==='proposal_open_contract'&&data.proposal_open_contract){
       const contract=data.proposal_open_contract, id=Object.keys(botRuntime).find(k=>botRuntime[k].openContract===contract.contract_id);
