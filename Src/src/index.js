@@ -228,6 +228,8 @@ async function handleTradingSocket(request, env) {
       if (symbol && hasUnder && hasOver) validSymbols.add(symbol);
     }
 
+    if (data.error && data.req_id) { proposalRequests.delete(data.req_id); buyRequests.delete(data.req_id); }
+
     if (data.msg_type === "proposal" && data.proposal?.id) {
       const req = proposalRequests.get(data.req_id);
       if (req) {
