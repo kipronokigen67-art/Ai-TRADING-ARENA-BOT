@@ -122,7 +122,19 @@ async function handleTradingConnectionTest(request, env) {
   }
   const upstream = upstreamResponse.webSocket;
   if (upstreamResponse.status !== 101 || !upstream) {
-    console.error("AI_TRADING_TEST stage=websocket_upgrade_rejected status=" + upstreamResponse.status);
+    let rejectionCode = "unknown";
+    let rejectionMessage = "";
+    try {
+      const detail = await upstreamResponse.clone().json();
+      const item = detail?.errors?.[0] || detail?.error || {};
+      rejectionCode = String(item?.code || "unknown").slice(0, 80);
+      rejectionMessage = String(item?.message || "").replace(/[^\\x20-\\x7E]/g, "").slice(0, 160);
+    } catch {}
+    console.error("AI_TRADING_TEST stage=websocket_upgrade_rejected status=" + upstreamResponse.status +
+      " retry_after=" + (upstreamResponse.headers.get("retry-after") || "none") +
+      " server=" + (upstreamResponse.headers.get("server") || "none") +
+      " cf_ray=" + (upstreamResponse.headers.get("cf-ray") || "none") +
+      " code=" + rejectionCode + " message=" + rejectionMessage);
     return Response.json({
       connected: false,
       error: "websocket_upgrade_rejected",
@@ -215,7 +227,19 @@ async function handleTradingSocket(request, env) {
   }
   const upstream = upstreamResponse.webSocket;
   if (upstreamResponse.status !== 101 || !upstream) {
-    console.error("AI_TRADING_WS stage=upstream_upgrade_rejected status=" + upstreamResponse.status);
+    let rejectionCode = "unknown";
+    let rejectionMessage = "";
+    try {
+      const detail = await upstreamResponse.clone().json();
+      const item = detail?.errors?.[0] || detail?.error || {};
+      rejectionCode = String(item?.code || "unknown").slice(0, 80);
+      rejectionMessage = String(item?.message || "").replace(/[^\\x20-\\x7E]/g, "").slice(0, 160);
+    } catch {}
+    console.error("AI_TRADING_WS stage=upstream_upgrade_rejected status=" + upstreamResponse.status +
+      " retry_after=" + (upstreamResponse.headers.get("retry-after") || "none") +
+      " server=" + (upstreamResponse.headers.get("server") || "none") +
+      " cf_ray=" + (upstreamResponse.headers.get("cf-ray") || "none") +
+      " code=" + rejectionCode + " message=" + rejectionMessage);
     return Response.json({ error: "deriv_websocket_upgrade_failed", upstream_status: upstreamResponse.status }, { status: 502 });
   }
   console.log("AI_TRADING_WS stage=upstream_upgrade_success status=101");
