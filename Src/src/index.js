@@ -45,6 +45,9 @@ async function handleTradingSocket(request, env) {
   if (request.headers.get("Upgrade") !== "websocket") {
     return response("Expected a WebSocket upgrade.", 426);
   }
+  if (request.headers.get("Origin") !== "https://ai-trading-arena-bot.dollarprinterchoosen.workers.dev") {
+    return response("WebSocket origin is not allowed.", 403);
+  }
   const sessionId = readCookie(request, "ai_trading_session");
   if (!sessionId || !env.TOKENS) return Response.json({ error: "not_connected" }, { status: 401 });
   const saved = await env.TOKENS.get(`session:${sessionId}`);
