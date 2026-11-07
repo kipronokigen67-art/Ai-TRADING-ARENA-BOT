@@ -9,5 +9,10 @@
       "binding": "TOKENS",
       "id": "da6dbda858444dbf9e80f4a783e2dc51"
     }
-  ]
+  ],
+  "assets": {
+    "directory": "./",
+    "binding": "ASSETS",
+    "run_worker_first": true
+  }
 }
